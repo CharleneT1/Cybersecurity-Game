@@ -4,7 +4,7 @@ This repository contains a minimal prototype for an educational cyber-defense st
 
 ## Features
 
-- World map background supplied via `assets/world_map.png`, scaled beneath an on-screen navigation bar with regional labels.
+- World map land masses vector-rendered directly from traced coastline data, scaled beneath an on-screen navigation bar with regional labels. No external map image required, and land is always pixel-aligned with node placement.
 - Ten curated device nodes anchored to real-world metropolitan hubs with land-validated placement and scenario-specific lore.
 - Each node exposes unique metadata (device class, connectivity mix, focus area) and displays it on hover, alongside an infection status indicator.
 - Visible network links trace sensible connectivity paths (municipal Wi-Fi, VPN tunnels, fiber), color-coded green/red and annotated on hover with the link’s purpose and security posture.
@@ -16,7 +16,6 @@ This repository contains a minimal prototype for an educational cyber-defense st
 
 - Python 3.9+
 - [pygame](https://www.pygame.org/) (`pip install pygame`)
-- World map background image saved as `assets/world_map.png` (add the file locally; it is not committed to the repo)
 
 ## Running the prototype
 

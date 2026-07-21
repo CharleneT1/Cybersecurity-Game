@@ -19,10 +19,10 @@ import math
 import random
 import textwrap
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import pygame
+import pygame.gfxdraw
 
 from map_polygons import LAND_POLYGONS
 
@@ -42,7 +42,16 @@ NODE_RADIUS = 5
 MENU_HEIGHT = max(24, int(WINDOW_HEIGHT * 0.03))
 UPGRADE_STARTING_POINTS = 10
 UPGRADE_NODE_RADIUS = 28
-MAP_IMAGE_PATH = Path("assets/world_map.png")
+
+# Virtual map canvas the equirectangular projection is defined over (2:1,
+# spanning the full -180..180 / -90..90 lon/lat range). Land is vector-drawn
+# from LAND_POLYGONS onto this canvas, so it's always pixel-aligned with node
+# placement -- no external map image (and no risk of a mismatched projection
+# or aspect ratio) required.
+VIRTUAL_MAP_WIDTH = 2000.0
+VIRTUAL_MAP_HEIGHT = 1000.0
+LAND_COLOR = (42, 66, 50)
+LAND_OUTLINE_COLOR = (78, 112, 90)
 
 CONNECTION_SECURE_COLOR = (96, 186, 150)
 CONNECTION_COMPROMISED_COLOR = (210, 84, 84)
@@ -287,39 +296,19 @@ SCENARIO_CONNECTION_SPECS: Tuple[ScenarioConnectionSpec, ...] = (
 )
 
 
-def create_land_classifier(surface: pygame.Surface) -> Callable[[float, float], bool]:
-    """Return a callable that tests whether a lat/lon pair maps to land."""
+def draw_land(surface: pygame.Surface, projection: Projection) -> None:
+    """Vector-render land polygons through the same projection used for nodes.
 
-    pixels = pygame.surfarray.array3d(surface)
-    try:
-        alpha = pygame.surfarray.array_alpha(surface)
-    except ValueError:
-        alpha = None
+    Land and nodes are both derived from LAND_POLYGONS's lon/lat data via
+    Projection.to_screen(), so they can never drift out of alignment the way
+    an externally-sourced raster background could.
+    """
 
-    width, height = surface.get_size()
-
-    def is_land_image(lon: float, lat: float) -> bool:
-        x = (lon + 180.0) / 360.0 * (width - 1)
-        y = (1.0 - (lat + 90.0) / 180.0) * (height - 1)
-        ix = int(max(0, min(width - 1, x)))
-        iy = int(max(0, min(height - 1, y)))
-
-        r, g, b = pixels[ix, iy]
-        brightness = (int(r) + int(g) + int(b)) / 3.0
-        dominant_blue = int(b) - max(int(r), int(g)) > 24
-
-        if alpha is not None and int(alpha[ix, iy]) < 32:
-            return False
-        if dominant_blue and b > 80:
-            return False
-        if brightness < 32:
-            return False
-        return True
-
-    def combined(lon: float, lat: float) -> bool:
-        return is_land_image(lon, lat) or is_on_land(lon, lat)
-
-    return combined
+    for polygon in LAND_POLYGONS:
+        points = [projection.to_screen(lon, lat) for lon, lat in polygon]
+        int_points = [(int(round(x)), int(round(y))) for x, y in points]
+        pygame.gfxdraw.filled_polygon(surface, int_points, LAND_COLOR)
+        pygame.gfxdraw.aapolygon(surface, int_points, LAND_OUTLINE_COLOR)
 
 
 @dataclass(slots=True)
@@ -462,13 +451,6 @@ class Projection:
         y = (1.0 - (lat + 90.0) / 180.0) * self.map_height * self.scale + self.offset_y
         return x, y
 
-    def to_image_pixels(self, lon: float, lat: float) -> Tuple[int, int]:
-        x = (lon + 180.0) / 360.0 * (self.map_width - 1)
-        y = (1.0 - (lat + 90.0) / 180.0) * (self.map_height - 1)
-        return int(max(0, min(self.map_width - 1, x))), int(
-            max(0, min(self.map_height - 1, y))
-        )
-
 
 def generate_nodes(
     rng: random.Random, projection: Projection, is_land: Callable[[float, float], bool]
@@ -494,7 +476,7 @@ def generate_nodes(
                 lat, lon = jittered_lat, jittered_lon
                 break
         else:
-            if not is_land(lon, lat) and not is_on_land(lon, lat):
+            if not is_land(lon, lat):
                 print(f"Could not verify land for {spec.label}, forcing placement.")
 
                 # raise RuntimeError(
@@ -902,23 +884,12 @@ def main() -> None:
     screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
     clock = pygame.time.Clock()
 
-    if not MAP_IMAGE_PATH.exists():
-        raise FileNotFoundError(
-            f"World map image not found at {MAP_IMAGE_PATH.resolve()}"
-        )
-
-    background_image = pygame.image.load(str(MAP_IMAGE_PATH)).convert_alpha()
-    land_classifier = create_land_classifier(background_image)
-
-    map_width, map_height = background_image.get_size()
+    map_width, map_height = VIRTUAL_MAP_WIDTH, VIRTUAL_MAP_HEIGHT
     usable_height = WINDOW_HEIGHT - MENU_HEIGHT - 40
     scale = min(WINDOW_WIDTH / map_width, usable_height / map_height)
     scaled_size = (int(map_width * scale), int(map_height * scale))
-    background_surface = pygame.transform.smoothscale(background_image, scaled_size)
     offset_x = (WINDOW_WIDTH - scaled_size[0]) / 2
     offset_y = MENU_HEIGHT + (WINDOW_HEIGHT - MENU_HEIGHT - scaled_size[1]) / 2
-    background_rect = background_surface.get_rect()
-    background_rect.topleft = (round(offset_x), round(offset_y))
 
     rng = random.Random(SEED)
 
@@ -926,11 +897,11 @@ def main() -> None:
         map_width=map_width,
         map_height=map_height,
         scale=scale,
-        offset_x=background_rect.x,
-        offset_y=background_rect.y,
+        offset_x=offset_x,
+        offset_y=offset_y,
     )
 
-    nodes = generate_nodes(rng, projection, land_classifier)
+    nodes = generate_nodes(rng, projection, is_on_land)
     connections = build_connections()
     neighbors = build_neighbor_lists_from_connections(len(nodes), connections)
 
@@ -994,7 +965,7 @@ def main() -> None:
             time_since_update = 0.0
 
         screen.fill(BACKGROUND_COLOR)
-        screen.blit(background_surface, background_rect)
+        draw_land(screen, projection)
         draw_labels(screen, label_font, projection)
 
         mouse_pos = pygame.mouse.get_pos()
