@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import pygame
+import pygame.gfxdraw
 
 from map_polygons import LAND_POLYGONS
 
@@ -61,6 +62,20 @@ OFF_GUARD_PER_VULN_POINT = 0.05
 # lookups against it agree with the lon/lat math used for node placement. See
 # assets/README.md for regeneration instructions.
 MAP_IMAGE_PATH = Path("assets/world_map.png")
+
+# Bundled instead of pygame.font.SysFont("arial", ...), which silently
+# resolves to whatever the OS happens to have and looks inconsistent
+# (or ugly) across machines -- see assets/fonts/LICENSE.txt.
+FONT_REGULAR_PATH = Path("assets/fonts/DejaVuSans.ttf")
+FONT_BOLD_PATH = Path("assets/fonts/DejaVuSans-Bold.ttf")
+
+
+def load_font(size: int, bold: bool = False) -> pygame.font.Font:
+    path = FONT_BOLD_PATH if bold else FONT_REGULAR_PATH
+    if path.exists():
+        return pygame.font.Font(str(path), size)
+    return pygame.font.SysFont("arial", size, bold=bold)
+
 
 CONNECTION_SECURE_COLOR = (96, 186, 150)
 CONNECTION_COMPROMISED_COLOR = (210, 84, 84)
@@ -649,7 +664,30 @@ def draw_labels(surface: pygame.Surface, font: pygame.font.Font, projection: Pro
         surface.blit(label_surface, rect)
 
 
+_glow_cache: Dict[Tuple[Tuple[int, int, int], int, int], pygame.Surface] = {}
+
+
+def _glow_surface(color: Tuple[int, int, int], base_radius: int, extra: int) -> pygame.Surface:
+    key = (color, base_radius, extra)
+    cached = _glow_cache.get(key)
+    if cached is not None:
+        return cached
+    span = (base_radius + extra) * 2
+    surface = pygame.Surface((span, span), pygame.SRCALPHA)
+    center = span // 2
+    layers = 5
+    for i in range(layers, 0, -1):
+        t = i / layers
+        radius = int(base_radius + extra * t)
+        alpha = int(85 * (1 - t) ** 2)
+        pygame.gfxdraw.filled_circle(surface, center, center, radius, (*color, alpha))
+    _glow_cache[key] = surface
+    return surface
+
+
 def draw_nodes(surface: pygame.Surface, nodes: Sequence[Node]) -> None:
+    pulse = (math.sin(pygame.time.get_ticks() / 320.0) + 1) / 2  # 0..1, gentle breathing rhythm
+
     for node in nodes:
         if node.state == "infected":
             color = INFECTED_COLOR
@@ -659,8 +697,20 @@ def draw_nodes(surface: pygame.Surface, nodes: Sequence[Node]) -> None:
             color = LOCKED_COLOR
         else:
             color = SECURE_COLOR
+
+        cx, cy = int(node.x), int(node.y)
+
+        if node.state == "infected":
+            extra = 8 + int(6 * pulse)
+            glow = _glow_surface(color, NODE_RADIUS, extra)
+            surface.blit(glow, (cx - glow.get_width() // 2, cy - glow.get_height() // 2), special_flags=pygame.BLEND_RGBA_ADD)
+        elif node.state == "vulnerable":
+            glow = _glow_surface(color, NODE_RADIUS, 7)
+            surface.blit(glow, (cx - glow.get_width() // 2, cy - glow.get_height() // 2), special_flags=pygame.BLEND_RGBA_ADD)
+
         radius = NODE_RADIUS - 1 if node.state == "locked" else NODE_RADIUS
-        pygame.draw.circle(surface, color, (int(node.x), int(node.y)), radius)
+        pygame.gfxdraw.filled_circle(surface, cx, cy, radius, color)
+        pygame.gfxdraw.aacircle(surface, cx, cy, radius, color)
 
 
 def draw_connections(
@@ -782,15 +832,59 @@ def find_node_under_point(nodes: Sequence[Node], pos: Tuple[int, int]) -> Option
 
 
 def draw_menu(surface: pygame.Surface, buttons: Sequence[MenuButton], active: Optional[str], font: pygame.font.Font) -> None:
+    accent = (110, 170, 230)
     for button in buttons:
-        base_color = (40, 58, 80)
-        active_color = (76, 112, 160)
-        color = active_color if button.key == active else base_color
+        is_active = button.key == active
+        base_color = (32, 46, 66)
+        active_color = (52, 78, 112)
+        color = active_color if is_active else base_color
         pygame.draw.rect(surface, color, button.rect)
-        pygame.draw.rect(surface, (90, 130, 190), button.rect, 2)
-        label_surface = font.render(button.label, True, (230, 238, 255))
+        pygame.draw.rect(surface, (58, 78, 102), button.rect, 1)
+        label_color = (235, 242, 255) if is_active else (172, 188, 210)
+        label_surface = font.render(button.label, True, label_color)
         label_rect = label_surface.get_rect(center=button.rect.center)
         surface.blit(label_surface, label_rect)
+        if is_active:
+            underline = pygame.Rect(button.rect.x, button.rect.bottom - 3, button.rect.width, 3)
+            pygame.draw.rect(surface, accent, underline)
+
+
+def draw_stat_chip(
+    surface: pygame.Surface, font: pygame.font.Font, x: int, y: int,
+    label: str, value: str, color: Tuple[int, int, int],
+) -> int:
+    """Draws a single rounded stat pill and returns its width, so callers can
+    lay out several chips left-to-right without pre-measuring text twice."""
+
+    text_surface = font.render(f"{label}  {value}", True, (222, 230, 245))
+    height = 28
+    width = text_surface.get_width() + 40
+    rect = pygame.Rect(x, y, width, height)
+    pygame.draw.rect(surface, (21, 29, 44), rect, border_radius=height // 2)
+    pygame.draw.rect(surface, color, rect, 1, border_radius=height // 2)
+    dot_center = (rect.x + 16, rect.centery)
+    pygame.gfxdraw.filled_circle(surface, dot_center[0], dot_center[1], 4, color)
+    pygame.gfxdraw.aacircle(surface, dot_center[0], dot_center[1], 4, color)
+    surface.blit(text_surface, (rect.x + 26, rect.centery - text_surface.get_height() // 2))
+    return width
+
+
+def draw_hud_chips(
+    surface: pygame.Surface, font: pygame.font.Font, x: int, y: int,
+    vulnerable_count: int, infected_count: int, locked_count: int,
+    integrity_percent: float, attack_points: int,
+) -> None:
+    gap = 8
+    stats = (
+        ("Targets", str(vulnerable_count), VULNERABLE_COLOR),
+        ("Infected", str(infected_count), INFECTED_COLOR),
+        ("Locked", str(locked_count), LOCKED_COLOR),
+        ("Integrity", f"{integrity_percent:0.0f}%", SECURE_COLOR),
+        ("Attack Pts", str(attack_points), (120, 165, 225)),
+    )
+    cursor_x = x
+    for label, value, color in stats:
+        cursor_x += draw_stat_chip(surface, font, cursor_x, y, label, value, color) + gap
 
 
 TREE_TOP_PADDING = 34  # keeps the first row of nodes clear of the title/points text
@@ -808,6 +902,12 @@ def compute_upgrade_centers(
     return centers
 
 
+def draw_panel_shadow(surface: pygame.Surface, rect: pygame.Rect, offset: int = 6) -> None:
+    shadow = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
+    pygame.draw.rect(shadow, (0, 0, 0, 90), shadow.get_rect(), border_radius=14)
+    surface.blit(shadow, (rect.x + offset // 2, rect.y + offset))
+
+
 def draw_upgrade_panel(
     surface: pygame.Surface,
     panel_rect: pygame.Rect,
@@ -820,6 +920,7 @@ def draw_upgrade_panel(
     title: str = "Defense Upgrade Tree",
     points_label: str = "Upgrade Points",
 ) -> Optional[UpgradeNode]:
+    draw_panel_shadow(surface, panel_rect)
     pygame.draw.rect(surface, (18, 28, 45), panel_rect, border_radius=12)
     pygame.draw.rect(surface, (84, 116, 168), panel_rect, 2, border_radius=12)
 
@@ -913,6 +1014,7 @@ def draw_text_panel(
     title_font: pygame.font.Font,
     body_font: pygame.font.Font,
 ) -> None:
+    draw_panel_shadow(surface, rect)
     pygame.draw.rect(surface, (18, 28, 45), rect, border_radius=12)
     pygame.draw.rect(surface, (84, 116, 168), rect, 2, border_radius=12)
 
@@ -977,6 +1079,7 @@ def draw_target_panel(
     last_result: str,
     mouse_pos: Tuple[int, int],
 ) -> List[Tuple[UpgradeNode, pygame.Rect]]:
+    draw_panel_shadow(surface, panel_rect)
     pygame.draw.rect(surface, (18, 28, 45), panel_rect, border_radius=12)
     pygame.draw.rect(surface, (168, 96, 96), panel_rect, 2, border_radius=12)
 
@@ -1158,11 +1261,11 @@ def run_intro_scene(screen: pygame.Surface, clock: pygame.time.Clock) -> bool:
     player quit the window during the intro (main() should exit immediately
     without starting the map game), True once the login succeeds."""
 
-    title_font = pygame.font.SysFont("arial", 24)
-    header_font = pygame.font.SysFont("arial", 18)
-    body_font = pygame.font.SysFont("arial", 16)
-    small_font = pygame.font.SysFont("arial", 14)
-    field_font = pygame.font.SysFont("arial", 16)
+    title_font = load_font(24, bold=True)
+    header_font = load_font(18, bold=True)
+    body_font = load_font(16)
+    small_font = load_font(14)
+    field_font = load_font(16)
 
     feed_rect = pygame.Rect(40, 90, 700, 560)
     login_rect = pygame.Rect(780, 90, 460, 340)
@@ -1345,12 +1448,12 @@ def main() -> None:
     for node in nodes:
         node.state = "vulnerable" if node.id in STARTING_TARGET_IDS else "locked"
 
-    label_font = pygame.font.SysFont("arial", 18)
-    hud_font = pygame.font.SysFont("arial", 20)
-    tooltip_font = pygame.font.SysFont("arial", 16)
-    menu_font = pygame.font.SysFont("arial", max(18, int(MENU_HEIGHT * 0.6)))
-    panel_title_font = pygame.font.SysFont("arial", 20)
-    panel_body_font = pygame.font.SysFont("arial", 16)
+    label_font = load_font(18)
+    hud_font = load_font(15, bold=True)
+    tooltip_font = load_font(16)
+    menu_font = load_font(max(18, int(MENU_HEIGHT * 0.6)), bold=True)
+    panel_title_font = load_font(20, bold=True)
+    panel_body_font = load_font(16)
 
     menu_buttons = build_menu_buttons()
     upgrade_state: Dict[str, bool] = {node.id: False for node in UPGRADE_TREE}
@@ -1463,12 +1566,10 @@ def main() -> None:
         vulnerable_count = sum(1 for node in nodes if node.state == "vulnerable")
         locked_count = sum(1 for node in nodes if node.state == "locked")
         integrity_percent = 100.0 * (1 - infected_count / len(nodes))
-        hud_text = (
-            f"Targets: {vulnerable_count}  Infected: {infected_count}  Locked: {locked_count}  "
-            f"Integrity: {integrity_percent:0.1f}%  Attack Points: {attack_points}"
+        draw_hud_chips(
+            screen, hud_font, 20, MENU_HEIGHT + 12,
+            vulnerable_count, infected_count, locked_count, integrity_percent, attack_points,
         )
-        hud_surface = hud_font.render(hud_text, True, (220, 230, 240))
-        screen.blit(hud_surface, (20, MENU_HEIGHT + 12))
 
         pygame.draw.rect(screen, (18, 26, 38), (0, 0, WINDOW_WIDTH, MENU_HEIGHT))
         draw_menu(screen, menu_buttons, active_panel, menu_font)
