@@ -929,22 +929,35 @@ def draw_text_panel(
 
 
 ATTACK_ROW_HEIGHT = 60
+TARGET_REASONING_WRAP_WIDTH = 42
 
 
-TARGET_ROWS_BASE_TOP = 150  # leaves room for title/device-info/vulnerability block above
+def target_panel_layout(
+    node: Node, last_result: str, small_font: pygame.font.Font
+) -> Dict[str, int]:
+    """Y-offsets (relative to panel_rect.y) for the target panel's dynamic
+    content. The reasoning text's wrapped line count varies per node, so this
+    is computed once and shared between drawing and click hit-testing --
+    they can never disagree about where the attack rows actually are."""
+
+    line_height = small_font.get_linesize()
+    reasoning_lines = wrap_text_lines(node.vulnerability_reasoning, width=TARGET_REASONING_WRAP_WIDTH)
+    reasoning_top = 86
+    points_top = reasoning_top + len(reasoning_lines) * (line_height + 1) + 10
+    rows_top = points_top + 26 + (24 if last_result else 0)
+    return {"reasoning_top": reasoning_top, "points_top": points_top, "rows_top": rows_top}
 
 
 def compute_target_rows(
     panel_rect: pygame.Rect,
     unlocked_attacks: Sequence[UpgradeNode],
-    last_result: str,
+    rows_top: int,
 ) -> List[Tuple[UpgradeNode, pygame.Rect]]:
-    rows_top = panel_rect.y + TARGET_ROWS_BASE_TOP + (24 if last_result else 0)
     rows: List[Tuple[UpgradeNode, pygame.Rect]] = []
     for index, attack in enumerate(unlocked_attacks):
         row_rect = pygame.Rect(
             panel_rect.x + 12,
-            rows_top + index * (ATTACK_ROW_HEIGHT + 8),
+            panel_rect.y + rows_top + index * (ATTACK_ROW_HEIGHT + 8),
             panel_rect.width - 24,
             ATTACK_ROW_HEIGHT,
         )
@@ -983,8 +996,10 @@ def draw_target_panel(
     )
     surface.blit(vuln_surface, (panel_rect.x + 16, panel_rect.y + 66))
 
-    reasoning_y = panel_rect.y + 86
-    for line in wrap_text_lines(node.vulnerability_reasoning, width=42):
+    layout = target_panel_layout(node, last_result, small_font)
+
+    reasoning_y = panel_rect.y + layout["reasoning_top"]
+    for line in wrap_text_lines(node.vulnerability_reasoning, width=TARGET_REASONING_WRAP_WIDTH):
         reasoning_surface = small_font.render(line, True, (170, 180, 195))
         surface.blit(reasoning_surface, (panel_rect.x + 16, reasoning_y))
         reasoning_y += reasoning_surface.get_height() + 1
@@ -992,21 +1007,20 @@ def draw_target_panel(
     points_surface = small_font.render(
         f"Attack Points: {attack_points}", True, (230, 200, 200)
     )
-    surface.blit(points_surface, (panel_rect.x + 16, panel_rect.y + 128))
+    surface.blit(points_surface, (panel_rect.x + 16, panel_rect.y + layout["points_top"]))
 
     if last_result:
         result_surface = small_font.render(last_result, True, (240, 210, 140))
-        surface.blit(result_surface, (panel_rect.x + 16, panel_rect.y + TARGET_ROWS_BASE_TOP))
+        surface.blit(result_surface, (panel_rect.x + 16, panel_rect.y + layout["rows_top"] - 24))
 
     unlocked_attacks = [attack for attack in ATTACK_TREE if attack_state.get(attack.id, False)]
-    rows = compute_target_rows(panel_rect, unlocked_attacks, last_result)
+    rows = compute_target_rows(panel_rect, unlocked_attacks, layout["rows_top"])
 
     if not unlocked_attacks:
         hint_surface = small_font.render(
             "No attacks unlocked yet -- open Attacks to buy one.", True, (200, 180, 180)
         )
-        hint_y = panel_rect.y + TARGET_ROWS_BASE_TOP + (24 if last_result else 0)
-        surface.blit(hint_surface, (panel_rect.x + 16, hint_y))
+        surface.blit(hint_surface, (panel_rect.x + 16, panel_rect.y + layout["rows_top"]))
         return []
 
     mouse_x, mouse_y = mouse_pos
@@ -1045,11 +1059,14 @@ def draw_target_panel(
 def get_target_row_under_point(
     panel_rect: pygame.Rect,
     attack_state: Dict[str, bool],
+    node: Node,
     last_result: str,
+    small_font: pygame.font.Font,
     mouse_pos: Tuple[int, int],
 ) -> Optional[UpgradeNode]:
     unlocked_attacks = [attack for attack in ATTACK_TREE if attack_state.get(attack.id, False)]
-    rows = compute_target_rows(panel_rect, unlocked_attacks, last_result)
+    layout = target_panel_layout(node, last_result, small_font)
+    rows = compute_target_rows(panel_rect, unlocked_attacks, layout["rows_top"])
     for attack, row_rect in rows:
         if row_rect.collidepoint(mouse_pos):
             return attack
@@ -1172,7 +1189,8 @@ def main() -> None:
                 ):
                     target_node = nodes[selected_target]
                     chosen_attack = get_target_row_under_point(
-                        panel_rect, attack_state, last_attack_result, mouse_pos
+                        panel_rect, attack_state, target_node, last_attack_result,
+                        tooltip_font, mouse_pos,
                     )
                     if chosen_attack and attack_points >= ATTACK_ATTEMPT_COST:
                         attack_points -= ATTACK_ATTEMPT_COST
