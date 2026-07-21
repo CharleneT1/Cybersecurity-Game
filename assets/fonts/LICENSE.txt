@@ -1,0 +1,6 @@
+DejaVu Sans (Book and Bold), bundled here for consistent cross-platform
+rendering instead of relying on whatever "arial" resolves to per-OS.
+
+DejaVu fonts are built from the Bitstream Vera fonts and are freely
+redistributable, including for commercial use, with no royalty required.
+See https://dejavu-fonts.github.io/License.html for the full license text.
