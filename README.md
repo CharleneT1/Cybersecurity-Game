@@ -4,7 +4,8 @@ This repository contains a prototype educational cyber-attack strategy game insp
 
 ## Features
 
-- **Attacker choice, not autoplay.** Two starting endpoints are reachable targets; everything else is locked. Click a live (amber) target to open its attack picker.
+- **Tutorial gate: Sara's Laptop.** The game opens on a single OSINT/social-engineering puzzle, not the map. Sara's public posts (job announcement, a pet's birthday) are shown next to a login form for her work account; her email is spelled out in one post, her password pattern (pet name + age) in another. A first honest guess gets partial feedback ("username's right, password's wrong") instead of a full giveaway. Logging in is what unlocks the wider map.
+- **Attacker choice, not autoplay.** Two starting endpoints (Madrid, Barcelona) become reachable targets once Sara's laptop is compromised; everything else is locked. Click a live (amber) target to open its attack picker.
 - **Attack Tree.** A prerequisite tree (mirrors the defense Upgrade Tree's UI) where points unlock reusable attacks -- Credential Guessing, Phishing Link, Exploit Kit, Zero-Day Broker -- each favored against specific device types.
 - **Per-device vulnerability scoring.** Every node has a 1-10 vulnerability score with a short reasoning string, shown in its tooltip and attack panel. A favored attack always succeeds; an unfavored one still has real odds against a soft (high-scoring) target instead of a flat auto-fail.
 - **Progressive unlocking.** Successfully compromising a node unlocks its real network neighbors (from the same connection graph used for the visible links) as new targets and pays out attack points.
@@ -25,14 +26,14 @@ This repository contains a prototype educational cyber-attack strategy game insp
 python3 main.py
 ```
 
-Click a highlighted (amber) node to attack it -- you'll need at least one unlocked attack from the "Attacks" menu first. Close the window or press `Alt+F4`/`Cmd+W` to quit.
+Solve the Sara's Laptop login first (OSINT her posts on the left for the real username and password), then click a highlighted (amber) node on the map to attack it -- you'll need at least one unlocked attack from the "Attacks" menu first. Close the window or press `Alt+F4`/`Cmd+W` to quit.
 
 ## Next steps
 
 From the original hackathon design notes, not yet built:
 
-- A victim social-media/OSINT screen (reviewing a target's public posts before choosing a credential-guessing angle).
-- A dedicated credential-guessing mini-interaction (username/password guess screen), rather than resolving it as a single attack-tree click.
+- **Multi-hit targets:** some devices may need more than one successful attack to fully compromise, instead of every hit being single-shot.
+- A richer OSINT puzzle with decoy details and multiple guess attempts (the current tutorial is the focused version: one clean clue per credential).
 - Transmission-vector types (Bluetooth, home network, public Wi-Fi) as a distinct choice from the attack/exploit type.
 - A general scoring table (infectivity / severity / comms) summarizing a run, beyond the current integrity percentage.
 

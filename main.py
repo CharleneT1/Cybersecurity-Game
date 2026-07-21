@@ -1073,11 +1073,237 @@ def get_target_row_under_point(
     return None
 
 
+# Tutorial gate: this social-engineering/OSINT puzzle is the sole starting
+# point. The rest of the map (Madrid, Barcelona, and everything they unlock)
+# only becomes reachable after logging into Sara's laptop.
+SaraPost = Tuple[str, str, bool]  # (author, text, has_dog_photo)
+
+SARA_POSTS: Tuple[SaraPost, ...] = (
+    (
+        "Sara Müller",
+        "New job announcement! So excited to join Nordwind Logistics as a Security "
+        "Analyst. Reach me at sara.muller@nordwind-logistics.com",
+        False,
+    ),
+    (
+        "Sara Müller",
+        "Buddy turned 3 today and insisted on a whole cake to himself.",
+        True,
+    ),
+    (
+        "Sara Müller",
+        "Home office day with my favorite coworker supervising every video call.",
+        False,
+    ),
+)
+SARA_CORRECT_USERNAME = "sara.muller@nordwind-logistics.com"
+SARA_CORRECT_PASSWORD = "Buddy3"
+SARA_HINTS: Tuple[str, ...] = (
+    "Look for a way she'd be reached professionally -- that's the username.",
+    "One post pairs a name with a number. People reuse exactly that as a password.",
+    f'Try "{SARA_CORRECT_PASSWORD}" for the password.',
+)
+
+
+def draw_dog_icon(surface: pygame.Surface, center: Tuple[int, int], radius: int) -> None:
+    cx, cy = center
+    ear_color = (150, 108, 66)
+    head_color = (196, 152, 102)
+    pygame.draw.polygon(
+        surface, ear_color,
+        [(cx - radius, cy - radius * 0.2), (cx - radius * 1.4, cy - radius * 1.3), (cx - radius * 0.3, cy - radius * 0.6)],
+    )
+    pygame.draw.polygon(
+        surface, ear_color,
+        [(cx + radius, cy - radius * 0.2), (cx + radius * 1.4, cy - radius * 1.3), (cx + radius * 0.3, cy - radius * 0.6)],
+    )
+    pygame.draw.circle(surface, head_color, (cx, cy), radius)
+    eye_offset = radius * 0.35
+    pygame.draw.circle(surface, (40, 30, 24), (int(cx - eye_offset), int(cy - eye_offset * 0.3)), max(2, radius // 8))
+    pygame.draw.circle(surface, (40, 30, 24), (int(cx + eye_offset), int(cy - eye_offset * 0.3)), max(2, radius // 8))
+    pygame.draw.ellipse(
+        surface, (120, 84, 56),
+        (cx - radius * 0.3, cy + radius * 0.15, radius * 0.6, radius * 0.45),
+    )
+
+
+@dataclass
+class TextField:
+    rect: pygame.Rect
+    label: str
+    value: str = ""
+    masked: bool = False
+    active: bool = False
+
+    def display_text(self) -> str:
+        return "•" * len(self.value) if self.masked else self.value
+
+
+def draw_text_field(surface: pygame.Surface, font: pygame.font.Font, field: TextField) -> None:
+    border_color = (120, 160, 210) if field.active else (70, 90, 115)
+    pygame.draw.rect(surface, (16, 24, 38), field.rect, border_radius=6)
+    pygame.draw.rect(surface, border_color, field.rect, 2, border_radius=6)
+    text_surface = font.render(field.display_text(), True, (225, 235, 250))
+    surface.blit(text_surface, (field.rect.x + 10, field.rect.y + (field.rect.height - text_surface.get_height()) // 2))
+    if field.active and (pygame.time.get_ticks() // 500) % 2 == 0:
+        cursor_x = field.rect.x + 10 + text_surface.get_width() + 2
+        pygame.draw.line(
+            surface, (225, 235, 250),
+            (cursor_x, field.rect.y + 6), (cursor_x, field.rect.bottom - 6), 2,
+        )
+
+
+def run_intro_scene(screen: pygame.Surface, clock: pygame.time.Clock) -> bool:
+    """Sara's laptop OSINT/credential-guessing tutorial. Returns False if the
+    player quit the window during the intro (main() should exit immediately
+    without starting the map game), True once the login succeeds."""
+
+    title_font = pygame.font.SysFont("arial", 24)
+    header_font = pygame.font.SysFont("arial", 18)
+    body_font = pygame.font.SysFont("arial", 16)
+    small_font = pygame.font.SysFont("arial", 14)
+    field_font = pygame.font.SysFont("arial", 16)
+
+    feed_rect = pygame.Rect(40, 90, 700, 560)
+    login_rect = pygame.Rect(780, 90, 460, 340)
+
+    username_field = TextField(pygame.Rect(login_rect.x + 24, login_rect.y + 84, login_rect.width - 48, 36), "Username")
+    password_field = TextField(pygame.Rect(login_rect.x + 24, login_rect.y + 160, login_rect.width - 48, 36), "Password", masked=True)
+    username_field.active = True
+
+    login_button = pygame.Rect(login_rect.x + 24, login_rect.y + 220, login_rect.width - 48, 40)
+
+    message = ""
+    message_color = (200, 200, 210)
+    attempts = 0
+
+    running = True
+    solved = False
+    while running and not solved:
+        clock.tick(60)
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                return False
+            elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                if username_field.rect.collidepoint(event.pos):
+                    username_field.active = True
+                    password_field.active = False
+                elif password_field.rect.collidepoint(event.pos):
+                    password_field.active = True
+                    username_field.active = False
+                elif login_button.collidepoint(event.pos):
+                    attempts += 1
+                    username_ok = username_field.value.strip().lower() == SARA_CORRECT_USERNAME.lower()
+                    password_ok = password_field.value == SARA_CORRECT_PASSWORD
+                    if username_ok and password_ok:
+                        message = "Access granted. Loading the wider network..."
+                        message_color = (140, 220, 160)
+                        solved = True
+                    elif username_ok:
+                        message = "Username looks right. Password's wrong -- check her posts for a name + number."
+                        message_color = (230, 190, 130)
+                    else:
+                        message = "That username doesn't look right -- how would you actually reach Sara?"
+                        message_color = (220, 140, 140)
+                else:
+                    username_field.active = False
+                    password_field.active = False
+            elif event.type == pygame.KEYDOWN:
+                active_field = username_field if username_field.active else (
+                    password_field if password_field.active else None
+                )
+                if event.key == pygame.K_TAB:
+                    username_field.active, password_field.active = password_field.active, username_field.active
+                elif event.key == pygame.K_RETURN:
+                    if username_field.active:
+                        username_field.active, password_field.active = False, True
+                    else:
+                        pygame.event.post(pygame.event.Event(
+                            pygame.MOUSEBUTTONDOWN, pos=login_button.center, button=1
+                        ))
+                elif active_field is not None:
+                    if event.key == pygame.K_BACKSPACE:
+                        active_field.value = active_field.value[:-1]
+                    elif event.unicode and event.unicode.isprintable():
+                        active_field.value += event.unicode
+
+        screen.fill((10, 14, 22))
+
+        title_surface = title_font.render("Recon: Sara's Laptop", True, (235, 240, 250))
+        screen.blit(title_surface, (40, 36))
+        subtitle_surface = small_font.render(
+            "OSINT her public posts, then try logging into her work account.", True, (150, 165, 190)
+        )
+        screen.blit(subtitle_surface, (40, 66))
+
+        pygame.draw.rect(screen, (16, 22, 34), feed_rect, border_radius=12)
+        pygame.draw.rect(screen, (60, 78, 105), feed_rect, 2, border_radius=12)
+        feed_title = header_font.render("Sara Müller -- public profile", True, (225, 232, 245))
+        screen.blit(feed_title, (feed_rect.x + 20, feed_rect.y + 16))
+
+        post_y = feed_rect.y + 56
+        for author, text, has_dog in SARA_POSTS:
+            post_rect = pygame.Rect(feed_rect.x + 20, post_y, feed_rect.width - 40, 130 if has_dog else 90)
+            pygame.draw.rect(screen, (22, 30, 46), post_rect, border_radius=10)
+            pygame.draw.rect(screen, (48, 62, 86), post_rect, 1, border_radius=10)
+            author_surface = body_font.render(author, True, (210, 220, 240))
+            screen.blit(author_surface, (post_rect.x + 14, post_rect.y + 10))
+            if has_dog:
+                draw_dog_icon(screen, (post_rect.x + 50, post_rect.y + 70), 28)
+                text_x = post_rect.x + 100
+            else:
+                text_x = post_rect.x + 14
+            for line_idx, line in enumerate(wrap_text_lines(text, width=48 if not has_dog else 32)):
+                line_surface = small_font.render(line, True, (185, 195, 215))
+                screen.blit(line_surface, (text_x, post_rect.y + 36 + line_idx * 18))
+            post_y += post_rect.height + 16
+
+        pygame.draw.rect(screen, (16, 22, 34), login_rect, border_radius=12)
+        pygame.draw.rect(screen, (60, 78, 105), login_rect, 2, border_radius=12)
+        login_title = header_font.render("Nordwind Logistics -- Account Access", True, (225, 232, 245))
+        screen.blit(login_title, (login_rect.x + 24, login_rect.y + 16))
+
+        username_label = small_font.render("Username", True, (160, 175, 200))
+        screen.blit(username_label, (username_field.rect.x, username_field.rect.y - 20))
+        draw_text_field(screen, field_font, username_field)
+
+        password_label = small_font.render("Password", True, (160, 175, 200))
+        screen.blit(password_label, (password_field.rect.x, password_field.rect.y - 20))
+        draw_text_field(screen, field_font, password_field)
+
+        pygame.draw.rect(screen, (70, 110, 160), login_button, border_radius=8)
+        login_label = body_font.render("Log In", True, (240, 245, 255))
+        login_label_rect = login_label.get_rect(center=login_button.center)
+        screen.blit(login_label, login_label_rect)
+
+        if message:
+            for idx, line in enumerate(wrap_text_lines(message, width=46)):
+                message_surface = small_font.render(line, True, message_color)
+                screen.blit(message_surface, (login_rect.x + 24, login_button.bottom + 16 + idx * 18))
+
+        if attempts >= 2 and not solved:
+            hint_index = min(attempts - 2, len(SARA_HINTS) - 1)
+            hint_surface = small_font.render(f"Hint: {SARA_HINTS[hint_index]}", True, (150, 180, 210))
+            screen.blit(hint_surface, (login_rect.x + 24, login_rect.bottom - 28))
+
+        pygame.display.flip()
+
+    if solved:
+        # Brief pause so "Access granted" is actually readable before the map appears.
+        pygame.display.flip()
+        pygame.time.wait(1200)
+    return solved
+
+
 def main() -> None:
     pygame.init()
     pygame.display.set_caption("Cyber Defense Prototype")
     screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
     clock = pygame.time.Clock()
+
+    if not run_intro_scene(screen, clock):
+        pygame.quit()
+        return
 
     if not MAP_IMAGE_PATH.exists():
         raise FileNotFoundError(
