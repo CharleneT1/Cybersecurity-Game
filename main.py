@@ -19,10 +19,10 @@ import math
 import random
 import textwrap
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import pygame
-import pygame.gfxdraw
 
 from map_polygons import LAND_POLYGONS
 
@@ -31,27 +31,36 @@ SEED = 42
 WINDOW_WIDTH = 1280
 WINDOW_HEIGHT = 720
 NODE_COUNT = 10
-CONNECTION_RADIUS = 120  # pixels used when weighting infection odds
-UPDATE_INTERVAL = 0.6  # seconds between infection ticks
-MAX_INFECTION_ATTEMPTS = 4
 BACKGROUND_COLOR = (13, 21, 34)
 INFECTED_COLOR = (222, 70, 70)
 SECURE_COLOR = (70, 200, 120)
-VULNERABLE_COLOR = (240, 208, 96)
+VULNERABLE_COLOR = (240, 208, 96)  # unlocked and attackable, not yet infected
+LOCKED_COLOR = (56, 66, 80)  # not yet reachable as a target
 NODE_RADIUS = 5
 MENU_HEIGHT = max(24, int(WINDOW_HEIGHT * 0.03))
 UPGRADE_STARTING_POINTS = 10
 UPGRADE_NODE_RADIUS = 28
 
-# Virtual map canvas the equirectangular projection is defined over (2:1,
-# spanning the full -180..180 / -90..90 lon/lat range). Land is vector-drawn
-# from LAND_POLYGONS onto this canvas, so it's always pixel-aligned with node
-# placement -- no external map image (and no risk of a mismatched projection
-# or aspect ratio) required.
-VIRTUAL_MAP_WIDTH = 2000.0
-VIRTUAL_MAP_HEIGHT = 1000.0
-LAND_COLOR = (42, 66, 50)
-LAND_OUTLINE_COLOR = (78, 112, 90)
+# Attacker-side progression: two nodes start as reachable targets, the rest
+# stay locked until a neighboring node is compromised. Attacks are unlocked
+# once (like upgrades) then can be launched repeatedly at a small per-attempt
+# cost; a successful hit unlocks that node's neighbors and pays out points.
+STARTING_TARGET_IDS = (0, 1)
+ATTACK_STARTING_POINTS = 10
+ATTACK_ATTEMPT_COST = 1
+INFECTION_REWARD = 4
+
+# Off-guard odds (attack not favored against the target's device type) scale
+# with the target's own vulnerability_score (1-10), so a soft target can still
+# fall to the wrong tool while a hardened one mostly won't.
+OFF_GUARD_BASE_CHANCE = 0.15
+OFF_GUARD_PER_VULN_POINT = 0.05
+
+# Precision-generated (Cartopy + Natural Earth, public domain) equirectangular
+# map, exactly 2:1 and spanning the full -180..180 / -90..90 range -- so pixel
+# lookups against it agree with the lon/lat math used for node placement. See
+# assets/README.md for regeneration instructions.
+MAP_IMAGE_PATH = Path("assets/world_map.png")
 
 CONNECTION_SECURE_COLOR = (96, 186, 150)
 CONNECTION_COMPROMISED_COLOR = (210, 84, 84)
@@ -66,6 +75,8 @@ class ScenarioNodeSpec:
     location: str
     role: str
     connectivity: Tuple[str, ...]
+    vulnerability_score: int  # 1 (hardened) - 10 (soft target); feeds attack odds
+    vulnerability_reasoning: str
     lat_jitter: float = 0.35
     lon_jitter: float = 0.45
 
@@ -88,6 +99,8 @@ SCENARIO_NODE_SPECS: Tuple[ScenarioNodeSpec, ...] = (
         location="Madrid",
         role="Commuters checking transit updates through the municipal network.",
         connectivity=("Municipal Wi-Fi", "LTE", "Bluetooth"),
+        vulnerability_score=7,
+        vulnerability_reasoning="Personal phones on open municipal Wi-Fi rarely enforce baseline hygiene.",
         lat_jitter=0.25,
         lon_jitter=0.35,
     ),
@@ -100,6 +113,8 @@ SCENARIO_NODE_SPECS: Tuple[ScenarioNodeSpec, ...] = (
         location="Barcelona",
         role="Controls apartment climate sensors and lighting automations.",
         connectivity=("Fiber Uplink", "Zigbee", "Wi-Fi"),
+        vulnerability_score=8,
+        vulnerability_reasoning="Consumer IoT hubs ship with default credentials and rarely get firmware updates.",
         lat_jitter=0.25,
         lon_jitter=0.35,
     ),
@@ -112,6 +127,8 @@ SCENARIO_NODE_SPECS: Tuple[ScenarioNodeSpec, ...] = (
         location="Valencia",
         role="Analysts tunneling into headquarters through managed VPN desks.",
         connectivity=("Enterprise Wi-Fi", "Ethernet", "VPN Client"),
+        vulnerability_score=4,
+        vulnerability_reasoning="Managed endpoints with enforced VPN and enterprise patching.",
         lat_jitter=0.25,
         lon_jitter=0.35,
     ),
@@ -124,6 +141,8 @@ SCENARIO_NODE_SPECS: Tuple[ScenarioNodeSpec, ...] = (
         location="Seville",
         role="Monitors critical care vitals from connected medical devices.",
         connectivity=("Secured Wi-Fi", "Bluetooth", "Zigbee"),
+        vulnerability_score=7,
+        vulnerability_reasoning="Medical IoT prioritizes uptime over patching; firmware is often years out of date.",
         lat_jitter=0.25,
         lon_jitter=0.35,
     ),
@@ -136,6 +155,8 @@ SCENARIO_NODE_SPECS: Tuple[ScenarioNodeSpec, ...] = (
         location="Bilbao",
         role="High-end rigs scrimming via low-latency competitive ladders.",
         connectivity=("Fiber LAN", "Wi-Fi 6", "Bluetooth"),
+        vulnerability_score=6,
+        vulnerability_reasoning="Gaming rigs run frequent third-party mods and overlays with broad permissions.",
         lat_jitter=0.25,
         lon_jitter=0.35,
     ),
@@ -148,6 +169,8 @@ SCENARIO_NODE_SPECS: Tuple[ScenarioNodeSpec, ...] = (
         location="Lisbon",
         role="Hosts SaaS workloads for Iberian customers with redundancy.",
         connectivity=("Fiber Backbone", "VPN Gateway", "SSH"),
+        vulnerability_score=3,
+        vulnerability_reasoning="Redundant SaaS infrastructure with hardened SSH access and active monitoring.",
         lat_jitter=0.25,
         lon_jitter=0.35,
     ),
@@ -160,6 +183,8 @@ SCENARIO_NODE_SPECS: Tuple[ScenarioNodeSpec, ...] = (
         location="Frankfurt",
         role="Aggregates secure tunnels for European enterprise tenants.",
         connectivity=("MPLS Backbone", "VPN Concentrator", "SSH"),
+        vulnerability_score=3,
+        vulnerability_reasoning="Purpose-built VPN concentrator with strict tenant isolation.",
         lat_jitter=0.3,
         lon_jitter=0.3,
     ),
@@ -172,6 +197,8 @@ SCENARIO_NODE_SPECS: Tuple[ScenarioNodeSpec, ...] = (
         location="Dublin",
         role="Caches media assets before distributing to Atlantic audiences.",
         connectivity=("Peered Fiber", "HTTPS", "SSH"),
+        vulnerability_score=5,
+        vulnerability_reasoning="Public-facing cache endpoints trade some hardening for throughput.",
         lat_jitter=0.3,
         lon_jitter=0.3,
     ),
@@ -184,6 +211,8 @@ SCENARIO_NODE_SPECS: Tuple[ScenarioNodeSpec, ...] = (
         location="New York City",
         role="Risk models syncing with European exchanges pre-market.",
         connectivity=("Private Fiber", "VPN Client", "SSH"),
+        vulnerability_score=5,
+        vulnerability_reasoning="High-value target with strict controls, but pre-market time pressure invites shortcuts.",
         lat_jitter=0.3,
         lon_jitter=0.3,
     ),
@@ -196,6 +225,8 @@ SCENARIO_NODE_SPECS: Tuple[ScenarioNodeSpec, ...] = (
         location="Tokyo",
         role="Origin streaming nodes serving Asia-Pacific subscribers.",
         connectivity=("Transpacific Fiber", "HTTPS", "SSH"),
+        vulnerability_score=5,
+        vulnerability_reasoning="Origin servers are hardened but expose a large HTTPS attack surface.",
         lat_jitter=0.3,
         lon_jitter=0.3,
     ),
@@ -296,19 +327,6 @@ SCENARIO_CONNECTION_SPECS: Tuple[ScenarioConnectionSpec, ...] = (
 )
 
 
-def draw_land(surface: pygame.Surface, projection: Projection) -> None:
-    """Vector-render land polygons through the same projection used for nodes.
-
-    Land and nodes are both derived from LAND_POLYGONS's lon/lat data via
-    Projection.to_screen(), so they can never drift out of alignment the way
-    an externally-sourced raster background could.
-    """
-
-    for polygon in LAND_POLYGONS:
-        points = [projection.to_screen(lon, lat) for lon, lat in polygon]
-        int_points = [(int(round(x)), int(round(y))) for x, y in points]
-        pygame.gfxdraw.filled_polygon(surface, int_points, LAND_COLOR)
-        pygame.gfxdraw.aapolygon(surface, int_points, LAND_OUTLINE_COLOR)
 
 
 @dataclass(slots=True)
@@ -326,6 +344,8 @@ class Node:
     connectivity: Tuple[str, ...]
     label: str
     summary: str
+    vulnerability_score: int
+    vulnerability_reasoning: str
     state: str = "secure"
 
 
@@ -345,6 +365,7 @@ class UpgradeNode:
     cost: int
     position: Tuple[int, int]
     prerequisites: Tuple[str, ...] = ()
+    effective_against: Tuple[str, ...] = ()  # attack-tree only; unused by defense upgrades
 
 
 @dataclass
@@ -404,9 +425,52 @@ UPGRADE_TREE: Tuple[UpgradeNode, ...] = (
 )
 
 
+ATTACK_TREE: Tuple[UpgradeNode, ...] = (
+    UpgradeNode(
+        id="credential_guess",
+        name="Credential Guessing",
+        description="Try leaked or common passwords against exposed logins.",
+        cost=2,
+        position=(80, 70),
+        effective_against=("phone", "computer"),
+    ),
+    UpgradeNode(
+        id="phishing_link",
+        name="Phishing Link",
+        description="Trick a user into opening a crafted payload link.",
+        cost=2,
+        position=(220, 70),
+        effective_against=("computer", "iot"),
+    ),
+    UpgradeNode(
+        id="exploit_kit",
+        name="Exploit Kit",
+        description="Chain a known CVE against an unpatched service.",
+        cost=3,
+        position=(150, 170),
+        prerequisites=("credential_guess", "phishing_link"),
+        effective_against=("server", "iot"),
+    ),
+    UpgradeNode(
+        id="zero_day_broker",
+        name="Zero-Day Broker",
+        description="Buy a fresh, unpatched exploit effective against anything.",
+        cost=4,
+        position=(150, 270),
+        prerequisites=("exploit_kit",),
+        effective_against=("phone", "computer", "iot", "server"),
+    ),
+)
+
+
 def build_menu_buttons() -> List[MenuButton]:
     buttons: List[MenuButton] = []
-    labels = (("Upgrades", "upgrades"), ("Virus Progress", "virus"), ("Settings", "settings"))
+    labels = (
+        ("Attacks", "attacks"),
+        ("Upgrades", "upgrades"),
+        ("Virus Progress", "virus"),
+        ("Settings", "settings"),
+    )
     button_width = WINDOW_WIDTH // len(labels)
     x = 0
     for index, (label, key) in enumerate(labels):
@@ -504,6 +568,8 @@ def generate_nodes(
                 connectivity=spec.connectivity,
                 label=spec.label,
                 summary=summary,
+                vulnerability_score=spec.vulnerability_score,
+                vulnerability_reasoning=spec.vulnerability_reasoning,
             )
         )
 
@@ -536,57 +602,27 @@ def build_neighbor_lists_from_connections(
     return neighbor_lists
 
 
-def infection_probability(source: Node, target: Node, distance: float) -> float:
-    # Base chance of infection.
-    base = 0.05
-
-    # Similar device types share vulnerabilities.
-    if source.device_type == target.device_type:
-        base += 0.12
-    else:
-        # Phones and IoT devices are both lightweight endpoints.
-        light_devices = {"phone", "iot"}
-        heavy_devices = {"computer", "server"}
-        if (
-            source.device_type in light_devices
-            and target.device_type in light_devices
-        ) or (
-            source.device_type in heavy_devices
-            and target.device_type in heavy_devices
-        ):
-            base += 0.05
-
-    # Closer nodes are more likely to be connected.
-    distance_factor = max(0.0, 1.0 - distance / CONNECTION_RADIUS)
-    base += 0.4 * distance_factor
-
-    return min(0.95, base)
+def off_guard_success_chance(node: Node) -> float:
+    return min(0.9, OFF_GUARD_BASE_CHANCE + node.vulnerability_score * OFF_GUARD_PER_VULN_POINT)
 
 
-def update_infections(
-    rng: random.Random, nodes: List[Node], neighbors: Sequence[Sequence[int]]
+def attempt_attack(rng: random.Random, node: Node, attack: UpgradeNode) -> bool:
+    """Resolve a launched attack against its target. Favored device types always
+    succeed; anything else rolls against the target's own vulnerability score,
+    matching the original design note that vector suitability *and* per-device
+    weakness should both affect success odds."""
+
+    if node.device_type in attack.effective_against:
+        return True
+    return rng.random() < off_guard_success_chance(node)
+
+
+def unlock_neighbors(
+    node_id: int, nodes: List[Node], neighbors: Sequence[Sequence[int]]
 ) -> None:
-    newly_infected: List[int] = []
-    for idx, node in enumerate(nodes):
-        if node.state != "infected":
-            continue
-        neighbor_indices = neighbors[idx]
-        if not neighbor_indices:
-            continue
-
-        attempts = min(len(neighbor_indices), MAX_INFECTION_ATTEMPTS)
-        targets = rng.sample(neighbor_indices, attempts)
-        for target_idx in targets:
-            target = nodes[target_idx]
-            if target.state == "infected":
-                continue
-            distance = math.hypot(node.x - target.x, node.y - target.y)
-            chance = infection_probability(node, target, distance)
-            if rng.random() < chance:
-                newly_infected.append(target_idx)
-
-    for idx in set(newly_infected):
-        nodes[idx].state = "infected"
+    for neighbor_idx in neighbors[node_id]:
+        if nodes[neighbor_idx].state == "locked":
+            nodes[neighbor_idx].state = "vulnerable"
 
 
 LABEL_SPECS: Sequence[Tuple[str, float, float, Tuple[int, int]]] = (
@@ -619,9 +655,12 @@ def draw_nodes(surface: pygame.Surface, nodes: Sequence[Node]) -> None:
             color = INFECTED_COLOR
         elif node.state == "vulnerable":
             color = VULNERABLE_COLOR
+        elif node.state == "locked":
+            color = LOCKED_COLOR
         else:
             color = SECURE_COLOR
-        pygame.draw.circle(surface, color, (int(node.x), int(node.y)), NODE_RADIUS)
+        radius = NODE_RADIUS - 1 if node.state == "locked" else NODE_RADIUS
+        pygame.draw.circle(surface, color, (int(node.x), int(node.y)), radius)
 
 
 def draw_connections(
@@ -730,6 +769,7 @@ def format_node_description(node: Node) -> List[str]:
     lines = [node.label, ""]
     lines.extend(node.summary.splitlines())
     lines.append(f"Status: {node.state.title()}")
+    lines.append(f"Vulnerability: {node.vulnerability_score}/10")
     return lines
 
 
@@ -753,12 +793,17 @@ def draw_menu(surface: pygame.Surface, buttons: Sequence[MenuButton], active: Op
         surface.blit(label_surface, label_rect)
 
 
-def compute_upgrade_centers(panel_rect: pygame.Rect) -> Dict[str, Tuple[int, int]]:
+TREE_TOP_PADDING = 34  # keeps the first row of nodes clear of the title/points text
+
+
+def compute_upgrade_centers(
+    panel_rect: pygame.Rect, tree: Sequence[UpgradeNode] = UPGRADE_TREE
+) -> Dict[str, Tuple[int, int]]:
     centers: Dict[str, Tuple[int, int]] = {}
-    for node in UPGRADE_TREE:
+    for node in tree:
         centers[node.id] = (
             panel_rect.x + node.position[0],
-            panel_rect.y + node.position[1],
+            panel_rect.y + node.position[1] + TREE_TOP_PADDING,
         )
     return centers
 
@@ -771,22 +816,25 @@ def draw_upgrade_panel(
     upgrade_state: Dict[str, bool],
     upgrade_points: int,
     mouse_pos: Tuple[int, int],
+    tree: Sequence[UpgradeNode] = UPGRADE_TREE,
+    title: str = "Defense Upgrade Tree",
+    points_label: str = "Upgrade Points",
 ) -> Optional[UpgradeNode]:
     pygame.draw.rect(surface, (18, 28, 45), panel_rect, border_radius=12)
     pygame.draw.rect(surface, (84, 116, 168), panel_rect, 2, border_radius=12)
 
-    title_surface = font.render("Defense Upgrade Tree", True, (230, 238, 255))
+    title_surface = font.render(title, True, (230, 238, 255))
     surface.blit(title_surface, (panel_rect.x + 16, panel_rect.y + 12))
 
     points_surface = small_font.render(
-        f"Upgrade Points: {upgrade_points}", True, (196, 212, 240)
+        f"{points_label}: {upgrade_points}", True, (196, 212, 240)
     )
     surface.blit(points_surface, (panel_rect.x + 16, panel_rect.y + 46))
 
-    centers = compute_upgrade_centers(panel_rect)
+    centers = compute_upgrade_centers(panel_rect, tree)
 
     # Draw connections first so nodes overlay the lines.
-    for node in UPGRADE_TREE:
+    for node in tree:
         node_center = centers[node.id]
         for prereq in node.prerequisites:
             prereq_center = centers.get(prereq)
@@ -795,7 +843,7 @@ def draw_upgrade_panel(
 
     hovered: Optional[UpgradeNode] = None
     mouse_x, mouse_y = mouse_pos
-    for node in UPGRADE_TREE:
+    for node in tree:
         center_x, center_y = centers[node.id]
         purchased = upgrade_state.get(node.id, False)
         prerequisites_met = all(upgrade_state.get(req, False) for req in node.prerequisites)
@@ -836,11 +884,13 @@ def draw_upgrade_panel(
 
 
 def get_upgrade_under_point(
-    panel_rect: pygame.Rect, mouse_pos: Tuple[int, int]
+    panel_rect: pygame.Rect,
+    mouse_pos: Tuple[int, int],
+    tree: Sequence[UpgradeNode] = UPGRADE_TREE,
 ) -> Optional[UpgradeNode]:
-    centers = compute_upgrade_centers(panel_rect)
+    centers = compute_upgrade_centers(panel_rect, tree)
     mx, my = mouse_pos
-    for node in UPGRADE_TREE:
+    for node in tree:
         center = centers[node.id]
         if math.hypot(mx - center[0], my - center[1]) <= UPGRADE_NODE_RADIUS:
             return node
@@ -878,18 +928,156 @@ def draw_text_panel(
         y += 6
 
 
+ATTACK_ROW_HEIGHT = 60
+
+
+TARGET_ROWS_BASE_TOP = 150  # leaves room for title/device-info/vulnerability block above
+
+
+def compute_target_rows(
+    panel_rect: pygame.Rect,
+    unlocked_attacks: Sequence[UpgradeNode],
+    last_result: str,
+) -> List[Tuple[UpgradeNode, pygame.Rect]]:
+    rows_top = panel_rect.y + TARGET_ROWS_BASE_TOP + (24 if last_result else 0)
+    rows: List[Tuple[UpgradeNode, pygame.Rect]] = []
+    for index, attack in enumerate(unlocked_attacks):
+        row_rect = pygame.Rect(
+            panel_rect.x + 12,
+            rows_top + index * (ATTACK_ROW_HEIGHT + 8),
+            panel_rect.width - 24,
+            ATTACK_ROW_HEIGHT,
+        )
+        rows.append((attack, row_rect))
+    return rows
+
+
+def draw_target_panel(
+    surface: pygame.Surface,
+    panel_rect: pygame.Rect,
+    title_font: pygame.font.Font,
+    body_font: pygame.font.Font,
+    small_font: pygame.font.Font,
+    node: Node,
+    attack_state: Dict[str, bool],
+    attack_points: int,
+    last_result: str,
+    mouse_pos: Tuple[int, int],
+) -> List[Tuple[UpgradeNode, pygame.Rect]]:
+    pygame.draw.rect(surface, (18, 28, 45), panel_rect, border_radius=12)
+    pygame.draw.rect(surface, (168, 96, 96), panel_rect, 2, border_radius=12)
+
+    title_surface = title_font.render(f"Target: {node.label}", True, (255, 236, 236))
+    surface.blit(title_surface, (panel_rect.x + 16, panel_rect.y + 12))
+
+    info_surface = small_font.render(
+        f"{node.device_type.title()} - {node.location}, {node.region}", True, (210, 190, 190)
+    )
+    surface.blit(info_surface, (panel_rect.x + 16, panel_rect.y + 44))
+
+    vuln_color = (230, 150, 150) if node.vulnerability_score >= 7 else (
+        (230, 200, 140) if node.vulnerability_score >= 5 else (170, 210, 180)
+    )
+    vuln_surface = small_font.render(
+        f"Vulnerability: {node.vulnerability_score}/10", True, vuln_color
+    )
+    surface.blit(vuln_surface, (panel_rect.x + 16, panel_rect.y + 66))
+
+    reasoning_y = panel_rect.y + 86
+    for line in wrap_text_lines(node.vulnerability_reasoning, width=42):
+        reasoning_surface = small_font.render(line, True, (170, 180, 195))
+        surface.blit(reasoning_surface, (panel_rect.x + 16, reasoning_y))
+        reasoning_y += reasoning_surface.get_height() + 1
+
+    points_surface = small_font.render(
+        f"Attack Points: {attack_points}", True, (230, 200, 200)
+    )
+    surface.blit(points_surface, (panel_rect.x + 16, panel_rect.y + 128))
+
+    if last_result:
+        result_surface = small_font.render(last_result, True, (240, 210, 140))
+        surface.blit(result_surface, (panel_rect.x + 16, panel_rect.y + TARGET_ROWS_BASE_TOP))
+
+    unlocked_attacks = [attack for attack in ATTACK_TREE if attack_state.get(attack.id, False)]
+    rows = compute_target_rows(panel_rect, unlocked_attacks, last_result)
+
+    if not unlocked_attacks:
+        hint_surface = small_font.render(
+            "No attacks unlocked yet -- open Attacks to buy one.", True, (200, 180, 180)
+        )
+        hint_y = panel_rect.y + TARGET_ROWS_BASE_TOP + (24 if last_result else 0)
+        surface.blit(hint_surface, (panel_rect.x + 16, hint_y))
+        return []
+
+    mouse_x, mouse_y = mouse_pos
+    for attack, row_rect in rows:
+        hovered = row_rect.collidepoint(mouse_x, mouse_y)
+        affordable = attack_points >= ATTACK_ATTEMPT_COST
+        favored = node.device_type in attack.effective_against
+
+        pygame.draw.rect(surface, (62, 80, 108) if hovered else (46, 60, 82), row_rect, border_radius=8)
+        pygame.draw.rect(surface, (90, 120, 168), row_rect, 1, border_radius=8)
+
+        name_surface = body_font.render(attack.name, True, (235, 240, 250))
+        surface.blit(name_surface, (row_rect.x + 10, row_rect.y + 6))
+
+        odds_text = (
+            "Favored target"
+            if favored
+            else f"~{int(off_guard_success_chance(node) * 100)}% odds"
+        )
+        odds_surface = small_font.render(
+            f"{odds_text} · launch: {ATTACK_ATTEMPT_COST} pt",
+            True,
+            (170, 220, 190) if favored else (210, 190, 150),
+        )
+        surface.blit(odds_surface, (row_rect.x + 10, row_rect.y + 30))
+
+        if not affordable:
+            locked_surface = small_font.render("Not enough points", True, (150, 100, 100))
+            locked_rect = locked_surface.get_rect()
+            locked_rect.topright = (row_rect.right - 10, row_rect.y + 10)
+            surface.blit(locked_surface, locked_rect)
+
+    return rows
+
+
+def get_target_row_under_point(
+    panel_rect: pygame.Rect,
+    attack_state: Dict[str, bool],
+    last_result: str,
+    mouse_pos: Tuple[int, int],
+) -> Optional[UpgradeNode]:
+    unlocked_attacks = [attack for attack in ATTACK_TREE if attack_state.get(attack.id, False)]
+    rows = compute_target_rows(panel_rect, unlocked_attacks, last_result)
+    for attack, row_rect in rows:
+        if row_rect.collidepoint(mouse_pos):
+            return attack
+    return None
+
+
 def main() -> None:
     pygame.init()
     pygame.display.set_caption("Cyber Defense Prototype")
     screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
     clock = pygame.time.Clock()
 
-    map_width, map_height = VIRTUAL_MAP_WIDTH, VIRTUAL_MAP_HEIGHT
+    if not MAP_IMAGE_PATH.exists():
+        raise FileNotFoundError(
+            f"World map image not found at {MAP_IMAGE_PATH.resolve()}. "
+            "See assets/README.md to regenerate it."
+        )
+
+    background_image = pygame.image.load(str(MAP_IMAGE_PATH)).convert_alpha()
+    map_width, map_height = background_image.get_size()
     usable_height = WINDOW_HEIGHT - MENU_HEIGHT - 40
     scale = min(WINDOW_WIDTH / map_width, usable_height / map_height)
     scaled_size = (int(map_width * scale), int(map_height * scale))
+    background_surface = pygame.transform.smoothscale(background_image, scaled_size)
     offset_x = (WINDOW_WIDTH - scaled_size[0]) / 2
     offset_y = MENU_HEIGHT + (WINDOW_HEIGHT - MENU_HEIGHT - scaled_size[1]) / 2
+    background_rect = background_surface.get_rect()
+    background_rect.topleft = (round(offset_x), round(offset_y))
 
     rng = random.Random(SEED)
 
@@ -897,17 +1085,22 @@ def main() -> None:
         map_width=map_width,
         map_height=map_height,
         scale=scale,
-        offset_x=offset_x,
-        offset_y=offset_y,
+        offset_x=background_rect.x,
+        offset_y=background_rect.y,
     )
 
+    # Node placement still uses the traced-polygon land test (is_on_land), not
+    # a pixel-color sample of the background image -- that keeps placement
+    # exact regardless of the image's art style, and it's already validated
+    # against every curated node in this scenario.
     nodes = generate_nodes(rng, projection, is_on_land)
     connections = build_connections()
     neighbors = build_neighbor_lists_from_connections(len(nodes), connections)
 
-    # Infect a single random node to start the outbreak.
-    patient_zero = rng.randrange(len(nodes))
-    nodes[patient_zero].state = "infected"
+    # Two nodes start as reachable targets; everything else stays locked until
+    # a neighboring node is successfully compromised (see unlock_neighbors()).
+    for node in nodes:
+        node.state = "vulnerable" if node.id in STARTING_TARGET_IDS else "locked"
 
     label_font = pygame.font.SysFont("arial", 18)
     hud_font = pygame.font.SysFont("arial", 20)
@@ -919,6 +1112,10 @@ def main() -> None:
     menu_buttons = build_menu_buttons()
     upgrade_state: Dict[str, bool] = {node.id: False for node in UPGRADE_TREE}
     upgrade_points = UPGRADE_STARTING_POINTS
+    attack_state: Dict[str, bool] = {attack.id: False for attack in ATTACK_TREE}
+    attack_points = ATTACK_STARTING_POINTS
+    selected_target: Optional[int] = None
+    last_attack_result = ""
     active_panel: Optional[str] = None
 
     panel_margin = 24
@@ -930,12 +1127,10 @@ def main() -> None:
         WINDOW_HEIGHT - MENU_HEIGHT - panel_margin * 2,
     )
 
-    time_since_update = 0.0
     running = True
 
     while running:
-        dt = clock.tick(60) / 1000.0
-        time_since_update += dt
+        clock.tick(60)
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -953,19 +1148,55 @@ def main() -> None:
                     continue
 
                 if active_panel == "upgrades" and panel_rect.collidepoint(mouse_pos):
-                    selected_upgrade = get_upgrade_under_point(panel_rect, mouse_pos)
+                    selected_upgrade = get_upgrade_under_point(panel_rect, mouse_pos, UPGRADE_TREE)
                     if selected_upgrade and can_purchase_upgrade(
                         selected_upgrade, upgrade_state, upgrade_points
                     ):
                         upgrade_state[selected_upgrade.id] = True
                         upgrade_points -= selected_upgrade.cost
+                    continue
 
-        if time_since_update >= UPDATE_INTERVAL:
-            update_infections(rng, nodes, neighbors)
-            time_since_update = 0.0
+                if active_panel == "attacks" and panel_rect.collidepoint(mouse_pos):
+                    selected_attack = get_upgrade_under_point(panel_rect, mouse_pos, ATTACK_TREE)
+                    if selected_attack and can_purchase_upgrade(
+                        selected_attack, attack_state, attack_points
+                    ):
+                        attack_state[selected_attack.id] = True
+                        attack_points -= selected_attack.cost
+                    continue
+
+                if (
+                    active_panel == "target"
+                    and selected_target is not None
+                    and panel_rect.collidepoint(mouse_pos)
+                ):
+                    target_node = nodes[selected_target]
+                    chosen_attack = get_target_row_under_point(
+                        panel_rect, attack_state, last_attack_result, mouse_pos
+                    )
+                    if chosen_attack and attack_points >= ATTACK_ATTEMPT_COST:
+                        attack_points -= ATTACK_ATTEMPT_COST
+                        if attempt_attack(rng, target_node, chosen_attack):
+                            target_node.state = "infected"
+                            unlock_neighbors(target_node.id, nodes, neighbors)
+                            attack_points += INFECTION_REWARD
+                            last_attack_result = ""
+                            active_panel = None
+                            selected_target = None
+                        else:
+                            last_attack_result = (
+                                f"{chosen_attack.name} failed -- try again or pick another vector."
+                            )
+                    continue
+
+                clicked_node = find_node_under_point(nodes, mouse_pos)
+                if clicked_node and clicked_node.state == "vulnerable":
+                    selected_target = clicked_node.id
+                    active_panel = "target"
+                    last_attack_result = ""
 
         screen.fill(BACKGROUND_COLOR)
-        draw_land(screen, projection)
+        screen.blit(background_surface, background_rect)
         draw_labels(screen, label_font, projection)
 
         mouse_pos = pygame.mouse.get_pos()
@@ -985,11 +1216,12 @@ def main() -> None:
             )
 
         infected_count = sum(1 for node in nodes if node.state == "infected")
-        secure_count = len(nodes) - infected_count
-        integrity_percent = 100.0 * (secure_count / len(nodes))
+        vulnerable_count = sum(1 for node in nodes if node.state == "vulnerable")
+        locked_count = sum(1 for node in nodes if node.state == "locked")
+        integrity_percent = 100.0 * (1 - infected_count / len(nodes))
         hud_text = (
-            f"Secure: {secure_count}  Infected: {infected_count}  "
-            f"Integrity: {integrity_percent:0.1f}%"
+            f"Targets: {vulnerable_count}  Infected: {infected_count}  Locked: {locked_count}  "
+            f"Integrity: {integrity_percent:0.1f}%  Attack Points: {attack_points}"
         )
         hud_surface = hud_font.render(hud_text, True, (220, 230, 240))
         screen.blit(hud_surface, (20, MENU_HEIGHT + 12))
@@ -997,15 +1229,52 @@ def main() -> None:
         pygame.draw.rect(screen, (18, 26, 38), (0, 0, WINDOW_WIDTH, MENU_HEIGHT))
         draw_menu(screen, menu_buttons, active_panel, menu_font)
 
-        hovered_upgrade: Optional[UpgradeNode] = None
+        panel_blocks_hover = (
+            active_panel in ("upgrades", "attacks", "target")
+            and panel_rect.collidepoint(mouse_pos)
+        )
+
+        hovered_tree_node: Optional[UpgradeNode] = None
+        active_tree_state: Optional[Dict[str, bool]] = None
         if active_panel == "upgrades":
-            hovered_upgrade = draw_upgrade_panel(
+            hovered_tree_node = draw_upgrade_panel(
                 screen,
                 panel_rect,
                 panel_title_font,
                 panel_body_font,
                 upgrade_state,
                 upgrade_points,
+                mouse_pos,
+                tree=UPGRADE_TREE,
+                title="Defense Upgrade Tree",
+                points_label="Upgrade Points",
+            )
+            active_tree_state = upgrade_state
+        elif active_panel == "attacks":
+            hovered_tree_node = draw_upgrade_panel(
+                screen,
+                panel_rect,
+                panel_title_font,
+                panel_body_font,
+                attack_state,
+                attack_points,
+                mouse_pos,
+                tree=ATTACK_TREE,
+                title="Attack Tree",
+                points_label="Attack Points",
+            )
+            active_tree_state = attack_state
+        elif active_panel == "target" and selected_target is not None:
+            draw_target_panel(
+                screen,
+                panel_rect,
+                panel_title_font,
+                panel_body_font,
+                tooltip_font,
+                nodes[selected_target],
+                attack_state,
+                attack_points,
+                last_attack_result,
                 mouse_pos,
             )
         elif active_panel == "virus":
@@ -1014,10 +1283,11 @@ def main() -> None:
                 panel_rect,
                 "Virus Progress",
                 [
-                    f"Active infections: {infected_count} of {len(nodes)} devices",
+                    f"Compromised: {infected_count} of {len(nodes)} devices",
+                    f"Reachable targets right now: {vulnerable_count}  ·  Still locked: {locked_count}",
                     f"Network integrity holding at {integrity_percent:0.1f}%.",
-                    "The malware favors close, similar devices but can leap across",
-                    "dense links. Defensive upgrades will mitigate spread in future builds.",
+                    "Click a highlighted (amber) node on the map to pick an attack and try",
+                    "to compromise it. A successful hit unlocks that device's neighbors.",
                 ],
                 panel_title_font,
                 panel_body_font,
@@ -1036,12 +1306,7 @@ def main() -> None:
                 panel_body_font,
             )
 
-        if (
-            hovered_node
-            and not (
-                active_panel == "upgrades" and panel_rect.collidepoint(mouse_pos)
-            )
-        ):
+        if hovered_node and not panel_blocks_hover:
             draw_tooltip(
                 screen,
                 tooltip_font,
@@ -1049,12 +1314,7 @@ def main() -> None:
                 (mouse_pos[0] + 16, mouse_pos[1] + 16),
             )
 
-        elif (
-            hovered_connection
-            and not (
-                active_panel == "upgrades" and panel_rect.collidepoint(mouse_pos)
-            )
-        ):
+        elif hovered_connection and not panel_blocks_hover:
             draw_tooltip(
                 screen,
                 tooltip_font,
@@ -1062,24 +1322,24 @@ def main() -> None:
                 (mouse_pos[0] + 16, mouse_pos[1] + 16),
             )
 
-        if (
-            hovered_upgrade
-            and active_panel == "upgrades"
-            and panel_rect.collidepoint(mouse_pos)
-        ):
-            tooltip_lines = [hovered_upgrade.name, ""]
+        if hovered_tree_node and active_tree_state is not None and panel_blocks_hover:
+            tooltip_lines = [hovered_tree_node.name, ""]
             tooltip_lines.extend(
-                wrap_text_lines(hovered_upgrade.description, width=38)
+                wrap_text_lines(hovered_tree_node.description, width=38)
             )
-            tooltip_lines.append(f"Cost: {hovered_upgrade.cost} point(s)")
-            unlocked = upgrade_state.get(hovered_upgrade.id, False)
+            tooltip_lines.append(f"Cost: {hovered_tree_node.cost} point(s)")
+            unlocked = active_tree_state.get(hovered_tree_node.id, False)
             prerequisites = (
-                ", ".join(hovered_upgrade.prerequisites)
-                if hovered_upgrade.prerequisites
+                ", ".join(hovered_tree_node.prerequisites)
+                if hovered_tree_node.prerequisites
                 else "None"
             )
             tooltip_lines.append(f"Unlocked: {'Yes' if unlocked else 'No'}")
             tooltip_lines.append(f"Requires: {prerequisites}")
+            if hovered_tree_node.effective_against:
+                tooltip_lines.append(
+                    f"Effective vs: {', '.join(hovered_tree_node.effective_against)}"
+                )
             draw_tooltip(
                 screen,
                 tooltip_font,
