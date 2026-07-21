@@ -31,7 +31,7 @@ from map_polygons import LAND_POLYGONS
 SEED = 42
 WINDOW_WIDTH = 1280
 WINDOW_HEIGHT = 720
-NODE_COUNT = 10
+NODE_COUNT = 11
 BACKGROUND_COLOR = (13, 21, 34)
 INFECTED_COLOR = (222, 70, 70)
 SECURE_COLOR = (70, 200, 120)
@@ -42,11 +42,14 @@ MENU_HEIGHT = max(24, int(WINDOW_HEIGHT * 0.03))
 UPGRADE_STARTING_POINTS = 10
 UPGRADE_NODE_RADIUS = 28
 
-# Attacker-side progression: two nodes start as reachable targets, the rest
-# stay locked until a neighboring node is compromised. Attacks are unlocked
-# once (like upgrades) then can be launched repeatedly at a small per-attempt
-# cost; a successful hit unlocks that node's neighbors and pays out points.
-STARTING_TARGET_IDS = (0, 1)
+# Attacker-side progression: Sara's Laptop (the tutorial's target) starts
+# already infected, which unlocks its real graph neighbors -- Madrid and
+# Barcelona -- as the first reachable targets via the same unlock_neighbors()
+# mechanism used for every later compromise. Everything else starts locked.
+# Attacks are unlocked once (like upgrades) then can be launched repeatedly
+# at a small per-attempt cost; a successful hit unlocks that node's
+# neighbors and pays out points.
+SARA_NODE_ID = 10
 ATTACK_STARTING_POINTS = 10
 ATTACK_ATTEMPT_COST = 1
 INFECTION_REWARD = 4
@@ -245,6 +248,20 @@ SCENARIO_NODE_SPECS: Tuple[ScenarioNodeSpec, ...] = (
         lat_jitter=0.3,
         lon_jitter=0.3,
     ),
+    ScenarioNodeSpec(
+        label="Sara's Laptop",
+        device_type="computer",
+        latitude=43.3623,
+        longitude=-8.4115,
+        region="Spain",
+        location="A Coruña",
+        role="Nordwind Logistics security analyst, working from home with VPN access to partner dashboards.",
+        connectivity=("Home Wi-Fi", "VPN Client", "Corporate SSO"),
+        vulnerability_score=6,
+        vulnerability_reasoning="Reused a personal-life password pattern (pet name + age) for her corporate login.",
+        lat_jitter=0.2,
+        lon_jitter=0.25,
+    ),
 )
 
 
@@ -338,6 +355,18 @@ SCENARIO_CONNECTION_SPECS: Tuple[ScenarioConnectionSpec, ...] = (
         target=9,
         medium="Peered VPN",
         description="New York and Tokyo coordinate DRM keys for simultaneous content launches.",
+    ),
+    ScenarioConnectionSpec(
+        source=10,
+        target=0,
+        medium="Partner VPN Access",
+        description="Sara's hijacked VPN session carries stored credentials for the Madrid transit network's monitoring dashboard.",
+    ),
+    ScenarioConnectionSpec(
+        source=10,
+        target=1,
+        medium="Vendor Dashboard Session",
+        description="Her browser keeps an active login to the Barcelona smart-home vendor's admin console for incident triage.",
     ),
 )
 
@@ -1443,10 +1472,13 @@ def main() -> None:
     connections = build_connections()
     neighbors = build_neighbor_lists_from_connections(len(nodes), connections)
 
-    # Two nodes start as reachable targets; everything else stays locked until
-    # a neighboring node is successfully compromised (see unlock_neighbors()).
+    # Sara's Laptop starts already compromised (the tutorial's outcome); its
+    # real graph neighbors -- Madrid and Barcelona -- unlock from that via the
+    # same mechanism every later compromise uses. Everything else is locked.
     for node in nodes:
-        node.state = "vulnerable" if node.id in STARTING_TARGET_IDS else "locked"
+        node.state = "locked"
+    nodes[SARA_NODE_ID].state = "infected"
+    unlock_neighbors(SARA_NODE_ID, nodes, neighbors)
 
     label_font = load_font(18)
     hud_font = load_font(15, bold=True)
