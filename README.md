@@ -2,6 +2,10 @@
 
 This repository contains a prototype educational cyber-attack strategy game inspired by _Plague Inc._. The player takes the attacker's side: pick a live target on the world map, choose which unlocked attack to launch at it based on its device type and vulnerability score, and successful hits unlock that device's neighbors as new targets.
 
+## Demo
+
+![Full playthrough: Sara's Laptop OSINT/login puzzle, the map opening with her device visible as an infected node connected to Madrid and Barcelona, exploring the menu, then unlocking and launching attacks to compromise both targets.](docs/demo.gif)
+
 ## Features
 
 - **Tutorial gate: Sara's Laptop.** The game opens on a single OSINT/social-engineering puzzle, not the map. Sara's public posts (job announcement, a pet's birthday) are shown next to a login form for her work account; her email is spelled out in one post, her password pattern (pet name + age) in another. A first honest guess gets partial feedback ("username's right, password's wrong") instead of a full giveaway.
